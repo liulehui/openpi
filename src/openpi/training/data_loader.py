@@ -6,7 +6,6 @@ from typing import Protocol, SupportsIndex, TypeVar
 
 import jax
 import jax.numpy as jnp
-import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
 
@@ -14,6 +13,8 @@ import openpi.models.model as _model
 import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
+
+import ray
 
 T_co = TypeVar("T_co", covariant=True)
 
@@ -135,6 +136,9 @@ def create_torch_dataset(
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
+
+    import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
@@ -364,7 +368,7 @@ class TorchDataLoader:
                 execute in the main process.
             seed: The seed to use for shuffling the data.
         """
-        if jax.process_count() > 1:
+        if jax.process_count() > 1 and not ray.train.get_context():
             raise NotImplementedError("Data loading with multiple processes is not supported.")
 
         if len(dataset) < local_batch_size:

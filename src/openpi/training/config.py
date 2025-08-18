@@ -719,7 +719,8 @@ _CONFIGS = [
     TrainConfig(
         name="debug",
         data=FakeDataConfig(),
-        batch_size=2,
+        # batch_size=2,
+        batch_size=16,
         model=pi0.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy"),
         save_interval=100,
         overwrite=True,
