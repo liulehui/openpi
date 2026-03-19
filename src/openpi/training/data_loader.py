@@ -1,7 +1,9 @@
 from collections.abc import Iterator, Sequence
+import json
 import logging
 import multiprocessing
 import os
+import pathlib
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
@@ -127,6 +129,60 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+class _HFDatasetTorchProxy:
+    def __init__(self, dataset):
+        self._dataset = dataset
+
+    def __getitem__(self, key):
+        value = self._dataset[key]
+        if isinstance(key, str):
+            return [item if isinstance(item, str) else torch.as_tensor(item) for item in value]
+        return value
+
+    def __len__(self):
+        return len(self._dataset)
+
+    def select(self, *args, **kwargs):
+        return _HFDatasetTorchProxy(self._dataset.select(*args, **kwargs))
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_dataset"), name)
+
+
+def _patch_lerobot_local_dataset_loading() -> None:
+    if getattr(lerobot_dataset.LeRobotDataset, "_openpi_local_format_patch", False):
+        return
+
+    original_load_hf_dataset = lerobot_dataset.LeRobotDataset.load_hf_dataset
+
+    def patched_load_hf_dataset(self):
+        hf_dataset = original_load_hf_dataset(self)
+        # `lerobot` accesses columns like `hf_dataset["timestamp"]` during initialization, which bypasses
+        # `set_transform(...)` and returns a pyarrow Column for local parquet datasets. Wrap the dataset so
+        # string-based column access yields torch tensors while normal item access keeps the original transform.
+        return _HFDatasetTorchProxy(hf_dataset)
+
+    lerobot_dataset.LeRobotDataset.load_hf_dataset = patched_load_hf_dataset
+    lerobot_dataset.LeRobotDataset._openpi_local_format_patch = True
+
+
+def _get_lerobot_metadata(data_config: _config.DataConfig) -> tuple[int, dict[int, str], dict[str, pathlib.Path]]:
+    if data_config.local_dataset_root is None:
+        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(data_config.repo_id)
+        return dataset_meta.fps, dataset_meta.tasks, {}
+
+    dataset_root = pathlib.Path(data_config.local_dataset_root).expanduser().resolve()
+    info = json.loads((dataset_root / "meta" / "info.json").read_text())
+    tasks = {
+        entry["task_index"]: entry["task"]
+        for entry in map(
+            json.loads,
+            (dataset_root / "meta" / "tasks.jsonl").read_text().splitlines(),
+        )
+    }
+    return info["fps"], tasks, {"root": dataset_root}
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -136,17 +192,20 @@ def create_torch_dataset(
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
+    if data_config.local_dataset_root is not None:
+        _patch_lerobot_local_dataset_loading()
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    fps, tasks, dataset_kwargs = _get_lerobot_metadata(data_config)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
         delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            key: [t / fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
+        **dataset_kwargs,
     )
 
     if data_config.prompt_from_task:
-        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(tasks)])
 
     return dataset
 
@@ -301,6 +360,12 @@ def create_torch_data_loader(
     """
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+
+    if data_config.local_dataset_root is not None and num_workers > 0:
+        logging.warning(
+            "Using num_workers=0 for local LeRobot datasets to avoid multiprocessing issues on local parquet loads."
+        )
+        num_workers = 0
 
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size

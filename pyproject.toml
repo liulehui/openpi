@@ -3,7 +3,7 @@ name = "openpi"
 version = "0.1.0"
 description = "Physical Intelligence open source repo"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 license = { file = "LICENSE" }
 dependencies = [
     "augmax>=0.3.4",
@@ -15,7 +15,8 @@ dependencies = [
     "fsspec[gcs]>=2024.6.0",
     "gym-aloha>=0.1.1",
     "imageio>=2.36.1",
-    "jax[cuda12]==0.5.3",
+    "jax[cuda12]==0.5.3; platform_system == 'Linux'",
+    "jax==0.5.3; platform_system == 'Darwin'",
     "jaxtyping==0.2.36",
     "lerobot",
     "ml_collections==1.0.0",
@@ -60,7 +61,11 @@ rlds = [
 ]
 
 [tool.uv]
-override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74"]
+override-dependencies = [
+    "ml-dtypes==0.4.1; platform_system == 'Linux'",
+    "ml-dtypes>=0.5; platform_system == 'Darwin'",
+    "tensorstore==0.1.74",
+]
 
 [tool.uv.sources]
 openpi-client = { workspace = true }

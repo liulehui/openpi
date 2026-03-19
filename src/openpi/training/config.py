@@ -65,6 +65,9 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # Optional local path to a LeRobot dataset root. If set, data loading uses this path instead of resolving
+    # the dataset from the default LeRobot cache location.
+    local_dataset_root: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -745,7 +748,7 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
-            base_config=DataConfig(prompt_from_task=True),
+            base_config=DataConfig(prompt_from_task=True, local_dataset_root="./data"),
             extra_delta_transform=False,
         ),
         batch_size=256,
