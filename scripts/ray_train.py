@@ -6,6 +6,8 @@ from typing import Literal
 
 import tyro
 
+import openpi.training.train_lib as train_lib
+
 
 @dataclasses.dataclass(frozen=True)
 class RayTrainArgs:
@@ -81,7 +83,6 @@ def train_loop_per_worker(train_loop_config: dict[str, Any]) -> None:
     import ray.train
 
     from openpi.training import config as _config
-    from scripts import train as train_script
 
     args = RayTrainArgs(**train_loop_config)
     config = _apply_overrides(_config.get_config(args.config_name), args)
@@ -97,7 +98,7 @@ def train_loop_per_worker(train_loop_config: dict[str, Any]) -> None:
         wandb_enabled=config.wandb_enabled and jax.process_index() == 0,
     )
 
-    train_script.main(config)
+    train_lib.main(config)
 
 
 def main(args: RayTrainArgs) -> None:
@@ -120,7 +121,9 @@ def main(args: RayTrainArgs) -> None:
 
     run_config_kwargs: dict[str, Any] = {
         "name": run_name,
-        "worker_runtime_env": {"env_vars": env_vars},
+        "worker_runtime_env": {
+            "env_vars": env_vars,
+        },
     }
     if args.storage_path is not None:
         run_config_kwargs["storage_path"] = args.storage_path
