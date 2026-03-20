@@ -1,4 +1,5 @@
 import dataclasses
+import os
 import shutil
 from typing import Any
 from typing import Literal
@@ -27,6 +28,10 @@ class RayTrainArgs:
     fsdp_devices: int | None = None
     checkpoint_base_dir: str | None = None
     assets_base_dir: str | None = None
+    data_repo_id: str | None = None
+    data_asset_id: str | None = None
+    data_assets_dir: str | None = None
+    hf_lerobot_home: str | None = None
 
     overwrite: bool = False
     resume: bool = False
@@ -34,11 +39,28 @@ class RayTrainArgs:
 
 
 def _apply_overrides(config, args: RayTrainArgs):
+    if args.hf_lerobot_home is not None:
+        os.environ["HF_LEROBOT_HOME"] = args.hf_lerobot_home
+
+    data = config.data
+    if args.data_repo_id is not None or args.data_asset_id is not None or args.data_assets_dir is not None:
+        current_assets = data.assets
+        data = dataclasses.replace(
+            data,
+            repo_id=args.data_repo_id if args.data_repo_id is not None else data.repo_id,
+            assets=dataclasses.replace(
+                current_assets,
+                assets_dir=args.data_assets_dir if args.data_assets_dir is not None else current_assets.assets_dir,
+                asset_id=args.data_asset_id if args.data_asset_id is not None else current_assets.asset_id,
+            ),
+        )
+
     replace_kwargs: dict[str, Any] = {
         "exp_name": args.exp_name,
         "overwrite": args.overwrite,
         "resume": args.resume,
         "wandb_enabled": args.wandb_enabled,
+        "data": data,
     }
     if args.batch_size is not None:
         replace_kwargs["batch_size"] = args.batch_size
@@ -92,7 +114,6 @@ def main(args: RayTrainArgs) -> None:
             "`ray.train.v2.jax.JaxTrainer` to use this script."
         ) from exc
 
-    ray.init(address=args.ray_address)
 
     run_name = args.run_name or f"{args.config_name}-{args.exp_name}"
     env_vars = {"JAX_PLATFORMS": "tpu" if args.accelerator == "tpu" else "cuda"}
