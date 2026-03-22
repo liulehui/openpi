@@ -1,5 +1,6 @@
 import dataclasses
 import functools
+import gc
 import logging
 import platform
 from typing import Any
@@ -265,7 +266,9 @@ def main(config: _config.TrainConfig):
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
+            gc.collect()
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
 
     logging.info("Waiting for checkpoint manager to finish")
+    gc.collect()
     checkpoint_manager.wait_until_finished()

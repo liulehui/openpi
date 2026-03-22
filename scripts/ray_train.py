@@ -35,6 +35,8 @@ class RayTrainArgs:
     data_assets_dir: str | None = None
     hf_lerobot_home: str | None = None
     hf_cache_dir: str | None = None
+    num_dataloader_workers: int | None = None
+    save_interval: int | None = None
 
     overwrite: bool = False
     resume: bool = False
@@ -75,6 +77,10 @@ def _apply_overrides(config, args: RayTrainArgs):
         replace_kwargs["checkpoint_base_dir"] = args.checkpoint_base_dir
     if args.assets_base_dir is not None:
         replace_kwargs["assets_base_dir"] = args.assets_base_dir
+    if args.num_dataloader_workers is not None:
+        replace_kwargs["num_workers"] = args.num_dataloader_workers
+    if args.save_interval is not None:
+        replace_kwargs["save_interval"] = args.save_interval
     return dataclasses.replace(config, **replace_kwargs)
 
 
@@ -89,10 +95,166 @@ def _default_hf_cache_dir(args: RayTrainArgs) -> str | None:
     return None
 
 
+def _apply_datasets_v3_compat():
+    """Monkey-patch torch.stack and lerobot to handle datasets>=3.0 Column type.
+
+    Applied in the worker process so it takes effect before any dataset loading.
+    """
+    import logging
+    import time
+
+    import torch
+
+    _orig_stack = torch.stack
+
+    def _compat_stack(tensors, *args, **kwargs):
+        if not isinstance(tensors, (list, tuple)):
+            try:
+                return _orig_stack(tensors, *args, **kwargs)
+            except TypeError:
+                return _orig_stack(list(tensors), *args, **kwargs)
+        return _orig_stack(tensors, *args, **kwargs)
+
+    torch.stack = _compat_stack
+
+    import lerobot.common.datasets.lerobot_dataset as _ld
+
+    _orig_init = _ld.LeRobotDataset.__init__
+
+    def _instrumented_init(self, *args, **kwargs):
+        t0 = time.monotonic()
+        logging.info("[LeRobotDataset] __init__ starting...")
+
+        from pathlib import Path
+
+        from lerobot.common.datasets.lerobot_dataset import (
+            CODEBASE_VERSION,
+            HF_LEROBOT_HOME,
+            LeRobotDatasetMetadata,
+            get_safe_default_codec,
+        )
+        from lerobot.common.datasets.utils import (
+            check_delta_timestamps,
+            check_timestamps_sync,
+            get_delta_indices,
+            get_episode_data_index,
+        )
+
+        repo_id = args[0] if args else kwargs.get("repo_id")
+        root = args[1] if len(args) > 1 else kwargs.get("root", None)
+        episodes = kwargs.get("episodes", None)
+        image_transforms = kwargs.get("image_transforms", None)
+        delta_timestamps = kwargs.get("delta_timestamps", None)
+        tolerance_s = kwargs.get("tolerance_s", 1e-4)
+        revision = kwargs.get("revision", None)
+        video_backend = kwargs.get("video_backend", None)
+        force_cache_sync = kwargs.get("force_cache_sync", False)
+        download_videos = kwargs.get("download_videos", True)
+
+        torch.utils.data.Dataset.__init__(self)
+        self.repo_id = repo_id
+        self.root = Path(root) if root else HF_LEROBOT_HOME / repo_id
+        self.image_transforms = image_transforms
+        self.delta_timestamps = delta_timestamps
+        self.episodes = episodes
+        self.tolerance_s = tolerance_s
+        self.revision = revision if revision else CODEBASE_VERSION
+        self.video_backend = video_backend if video_backend else get_safe_default_codec()
+        self.delta_indices = None
+        self.image_writer = None
+        self.episode_buffer = None
+        self.root.mkdir(exist_ok=True, parents=True)
+
+        logging.info(f"[LeRobotDataset] Loading metadata... ({time.monotonic() - t0:.1f}s)")
+        self.meta = LeRobotDatasetMetadata(self.repo_id, self.root, self.revision, force_cache_sync=force_cache_sync)
+
+        # Skip the 33s NFS file existence check and Hub fallback -- data is already local.
+        logging.info(f"[LeRobotDataset] Loading HF dataset directly... ({time.monotonic() - t0:.1f}s)")
+        self.hf_dataset = self.load_hf_dataset()
+
+        logging.info(f"[LeRobotDataset] HF dataset loaded. Building episode index... ({time.monotonic() - t0:.1f}s)")
+        self.episode_data_index = get_episode_data_index(self.meta.episodes, self.episodes)
+
+        # Skip timestamp validation -- it calls torch.stack on 273k-element columns
+        # which is extremely slow with datasets 3.x. Data was validated during preprocessing.
+
+        if self.delta_timestamps is not None:
+            logging.info(f"[LeRobotDataset] Computing delta indices... ({time.monotonic() - t0:.1f}s)")
+            check_delta_timestamps(self.delta_timestamps, self.fps, self.tolerance_s)
+            self.delta_indices = get_delta_indices(self.delta_timestamps, self.fps)
+
+        logging.info(f"[LeRobotDataset] __init__ complete in {time.monotonic() - t0:.1f}s")
+
+    _ld.LeRobotDataset.__init__ = _instrumented_init
+
+
+def _apply_multislice_mesh_fix():
+    """Fix JAX mesh creation for multislice TPU.
+
+    jax.make_mesh uses create_device_mesh which queries the per-slice physical
+    topology. With MegaScale multislice, the topology only describes one slice,
+    so the assertion len(devices) == prod(dims) fails when there are 2+ slices.
+
+    The fix: construct the mesh directly from the flat device list. The device
+    ordering from jax.devices() is already slice-major, host-major, chip-major,
+    which naturally groups each host's chips into one FSDP row.
+    """
+    import openpi.training.sharding as _sharding
+
+    _orig_make_mesh = _sharding.make_mesh
+
+    def _multislice_make_mesh(num_fsdp_devices: int):
+        import jax
+        import logging
+        import numpy as np
+
+        num_devices = jax.device_count()
+        if num_devices % num_fsdp_devices != 0:
+            raise ValueError(
+                f"Number of devices {num_devices} must be divisible by "
+                f"the number of FSDP devices {num_fsdp_devices}."
+            )
+        mesh_shape = (num_devices // num_fsdp_devices, num_fsdp_devices)
+
+        try:
+            return _orig_make_mesh(num_fsdp_devices)
+        except (AssertionError, Exception) as exc:
+            logging.info(
+                f"[multislice] jax.make_mesh failed ({type(exc).__name__}), "
+                f"constructing mesh manually: shape={mesh_shape} from {num_devices} devices"
+            )
+            devices = np.array(jax.devices()).reshape(mesh_shape)
+            return jax.sharding.Mesh(devices, axis_names=(_sharding.BATCH_AXIS, _sharding.FSDP_AXIS))
+
+    _sharding.make_mesh = _multislice_make_mesh
+
+
 def train_loop_per_worker(train_loop_config: dict[str, Any]) -> None:
     import jax
     import jax.experimental.multihost_utils as multihost_utils
     import ray.train
+
+    _apply_datasets_v3_compat()
+    _apply_multislice_mesh_fix()
+
+    import logging as _logging
+    import resource
+    import subprocess
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    _logging.info(f">>> [ulimit] Before: soft={soft}, hard={hard}")
+    try:
+        subprocess.run(["bash", "-c", "ulimit -n 1048576"], check=False)
+    except Exception:
+        pass
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (1048576, 1048576))
+    except (ValueError, OSError):
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+        except (ValueError, OSError):
+            pass
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    _logging.info(f"[ulimit] After: soft={soft}, hard={hard}")
 
     from openpi.training import config as _config
 
