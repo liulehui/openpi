@@ -34,6 +34,7 @@ class RayTrainArgs:
     data_asset_id: str | None = None
     data_assets_dir: str | None = None
     hf_lerobot_home: str | None = None
+    hf_cache_dir: str | None = None
 
     overwrite: bool = False
     resume: bool = False
@@ -77,6 +78,17 @@ def _apply_overrides(config, args: RayTrainArgs):
     return dataclasses.replace(config, **replace_kwargs)
 
 
+def _default_hf_cache_dir(args: RayTrainArgs) -> str | None:
+    """Choose a persistent HF cache location when using shared storage."""
+    if args.hf_cache_dir is not None:
+        return args.hf_cache_dir
+    if args.data_repo_id is not None and os.path.isabs(args.data_repo_id):
+        return os.path.join(args.data_repo_id, ".hf_cache")
+    if args.storage_path is not None and os.path.isabs(args.storage_path):
+        return os.path.join(args.storage_path, "hf_cache")
+    return None
+
+
 def train_loop_per_worker(train_loop_config: dict[str, Any]) -> None:
     import jax
     import jax.experimental.multihost_utils as multihost_utils
@@ -117,7 +129,18 @@ def main(args: RayTrainArgs) -> None:
 
 
     run_name = args.run_name or f"{args.config_name}-{args.exp_name}"
-    env_vars = {"JAX_PLATFORMS": "tpu" if args.accelerator == "tpu" else "cuda"}
+    env_vars = {
+        "JAX_PLATFORMS": "tpu" if args.accelerator == "tpu" else "cuda",
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.9",
+    }
+    if (hf_cache_dir := _default_hf_cache_dir(args)) is not None:
+        env_vars.update(
+            {
+                "HF_HOME": hf_cache_dir,
+                "HF_DATASETS_CACHE": os.path.join(hf_cache_dir, "datasets"),
+                "HF_HUB_CACHE": os.path.join(hf_cache_dir, "hub"),
+            }
+        )
 
     run_config_kwargs: dict[str, Any] = {
         "name": run_name,

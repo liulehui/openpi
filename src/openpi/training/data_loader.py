@@ -163,7 +163,9 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
+    logging.info("Loading LeRobotDatasetMetadata...")
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    logging.info("Creating LeRobotDataset (this includes HF dataset materialization)...")
     with _patch_torch_stack_for_datasets_v3():
         dataset = lerobot_dataset.LeRobotDataset(
             data_config.repo_id,
@@ -171,6 +173,7 @@ def create_torch_dataset(
                 key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
             },
         )
+    logging.info(f"LeRobotDataset created: {len(dataset)} examples")
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
