@@ -135,7 +135,7 @@ def main(args: RayTrainArgs) -> None:
             topology=args.topology,
             accelerator_type=args.accelerator_type,
             placement_strategy=args.placement_strategy,
-            resources_per_worker={"TPU": args.num_accelerators_per_worker},
+            resources_per_worker={"TPU": 4},
         )
     else:
         scaling_config = ScalingConfig(

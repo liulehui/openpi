@@ -127,6 +127,32 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+def _patch_torch_stack_for_datasets_v3():
+    """Context manager to handle datasets>=3.0 Column type in torch.stack calls.
+
+    In datasets>=3.0, dataset["column"] returns a Column object instead of a list.
+    LeRobotDataset.__init__ calls torch.stack on these, which fails with a TypeError.
+    """
+    import contextlib
+
+    @contextlib.contextmanager
+    def _patch():
+        _orig = torch.stack
+
+        def _compat(tensors, *args, **kwargs):
+            if not isinstance(tensors, (list, tuple)):
+                tensors = list(tensors)
+            return _orig(tensors, *args, **kwargs)
+
+        torch.stack = _compat
+        try:
+            yield
+        finally:
+            torch.stack = _orig
+
+    return _patch()
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -138,12 +164,13 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
-    )
+    with _patch_torch_stack_for_datasets_v3():
+        dataset = lerobot_dataset.LeRobotDataset(
+            data_config.repo_id,
+            delta_timestamps={
+                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            },
+        )
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
