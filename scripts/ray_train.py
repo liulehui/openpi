@@ -97,6 +97,14 @@ def train_loop_per_worker(train_loop_config: dict[str, Any]) -> None:
     from openpi.training import config as _config
 
     args = RayTrainArgs(**train_loop_config)
+
+    if (hf_cache_dir := _default_hf_cache_dir(args)) is not None:
+        worker_cache = os.path.join(hf_cache_dir, f"worker_{jax.process_index()}")
+        os.makedirs(worker_cache, exist_ok=True)
+        os.environ["HF_HOME"] = worker_cache
+        os.environ["HF_DATASETS_CACHE"] = os.path.join(worker_cache, "datasets")
+        os.environ["HF_HUB_CACHE"] = os.path.join(worker_cache, "hub")
+
     config = _apply_overrides(_config.get_config(args.config_name), args)
 
     if args.overwrite and jax.process_index() == 0 and config.checkpoint_dir.exists():
@@ -133,14 +141,6 @@ def main(args: RayTrainArgs) -> None:
         "JAX_PLATFORMS": "tpu" if args.accelerator == "tpu" else "cuda",
         "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.9",
     }
-    if (hf_cache_dir := _default_hf_cache_dir(args)) is not None:
-        env_vars.update(
-            {
-                "HF_HOME": hf_cache_dir,
-                "HF_DATASETS_CACHE": os.path.join(hf_cache_dir, "datasets"),
-                "HF_HUB_CACHE": os.path.join(hf_cache_dir, "hub"),
-            }
-        )
 
     run_config_kwargs: dict[str, Any] = {
         "name": run_name,

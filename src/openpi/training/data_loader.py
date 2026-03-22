@@ -141,7 +141,10 @@ def _patch_torch_stack_for_datasets_v3():
 
         def _compat(tensors, *args, **kwargs):
             if not isinstance(tensors, (list, tuple)):
-                tensors = list(tensors)
+                try:
+                    return _orig(tensors, *args, **kwargs)
+                except TypeError:
+                    return torch.tensor(list(tensors), *args, **kwargs)
             return _orig(tensors, *args, **kwargs)
 
         torch.stack = _compat
